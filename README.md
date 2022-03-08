@@ -1,5 +1,9 @@
 # Coroot-pg-agent
 
+[![Go Report Card](https://goreportcard.com/badge/github.com/coroot/coroot-pg-agent)](https://goreportcard.com/report/github.com/coroot/coroot-pg-agent)
+[![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
+
+
 Coroot-pg-agent is an open-source prometheus exporter that gathers metrics from Postgres servers.
 
 ## Philosophy

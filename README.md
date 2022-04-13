@@ -23,6 +23,12 @@ This provides visibility into Postgres performance without the need to navigate 
 The agent aggregates data from *pg_stat_statements* and *pg_stat_activity* to provide accurate
 metrics about queries, whether they are completed or still running.
 
+<img src="https://coroot.com/static/img/blog/pg_stat_statements_visibility.svg" width="800" />
+<img src="https://coroot.com/static/img/blog/pg_stat_activity_visibility.svg" width="800" />
+
+Learn more about query metrics in the blog post "[Missing metrics required to gain visibility into Postgres performance](https://coroot.com/blog/pg-missing-metrics)"
+
+
 ### Locks monitoring
 
 It is not enough to gather the number of active locks from *pg_locks*. 

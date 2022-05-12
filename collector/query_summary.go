@@ -61,6 +61,9 @@ func (s *QuerySummary) updateFromStatStatements(timestamp time.Time, cur, prev s
 	s.lastSeen = timestamp
 	totalTimeDelta := (cur.totalTime.Float64 - prev.totalTime.Float64) / 1000
 	callsDelta := float64(cur.calls.Int64 - prev.calls.Int64)
+	if totalTimeDelta < 0 || callsDelta < 0 {
+		return
+	}
 	s.lastTotalTimeDelta += totalTimeDelta
 	s.lastCallsDelta += callsDelta
 	s.totalTime.ssValue += totalTimeDelta

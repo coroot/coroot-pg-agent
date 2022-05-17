@@ -69,11 +69,12 @@ func (c *Collector) callPgStatStatements(now time.Time) error {
 		if id.user.String == "" || id.db.String == "" || !id.id.Valid {
 			continue
 		}
-		prev, ok := c.prevStatements[id]
-		if ok {
+		if len(c.prevStatements) > 0 {
+			prev := c.prevStatements[id]
 			curr.summary = prev.summary
 			if curr.summary == nil {
 				key := queryKey{query: obfuscate.Sql(query.String), user: id.user.String, db: id.db.String}
+				var ok bool
 				if curr.summary, ok = c.summaries[key]; !ok {
 					curr.summary = newQuerySummary()
 					c.summaries[key] = curr.summary

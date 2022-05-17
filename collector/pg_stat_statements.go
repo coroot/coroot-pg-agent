@@ -80,15 +80,14 @@ func (c *Collector) callPgStatStatements(now time.Time) error {
 				}
 			}
 			curr.summary.updateFromStatStatements(now, curr, prev)
-		}
 
-		dbSummary, ok := c.perDbSummaries[id.db.String]
-		if !ok {
-			dbSummary = newQuerySummary()
-			c.perDbSummaries[id.db.String] = dbSummary
+			dbSummary, ok := c.perDbSummaries[id.db.String]
+			if !ok {
+				dbSummary = newQuerySummary()
+				c.perDbSummaries[id.db.String] = dbSummary
+			}
+			dbSummary.updateFromStatStatements(now, curr, prev)
 		}
-		dbSummary.updateFromStatStatements(now, curr, prev)
-
 		currentStatements[id] = curr
 	}
 	c.prevStatements = currentStatements

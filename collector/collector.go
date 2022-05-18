@@ -43,6 +43,8 @@ type Collector struct {
 	perDbSummaries map[string]*QuerySummary
 	lock           sync.RWMutex
 
+	prevStatActivityCallTs time.Time
+
 	logger logger.Logger
 }
 

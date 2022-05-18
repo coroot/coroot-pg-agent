@@ -24,17 +24,23 @@ type session struct {
 }
 
 func (c *Collector) callPgStatActivity(now time.Time, ch chan<- prometheus.Metric) error {
+	var secondsSinceLastCall float64
+	if !c.prevStatActivityCallTs.IsZero() {
+		secondsSinceLastCall = now.Sub(c.prevStatActivityCallTs).Seconds()
+	}
+	c.prevStatActivityCallTs = now
 	var query string
 	switch {
 	case semver.MustParseRange(">=9.3.0 <9.6.0")(c.version):
-		query = `SELECT s.pid, s.datname, s.usename, s.query, s.state, extract(epoch from (clock_timestamp()-s.query_start)), s.waiting, null, null, null FROM pg_stat_activity s JOIN pg_database d ON s.datid = d.oid AND NOT d.datistemplate`
+		query += "SELECT s.pid, s.datname, s.usename, s.query, s.state, extract(epoch from now()-s.query_start), s.waiting, null, null, null"
 	case semver.MustParseRange(">=9.6.0 <10.0.0")(c.version):
-		query = "SELECT s.pid, s.datname, s.usename, s.query, s.state, extract(epoch from (clock_timestamp()-s.query_start)), null, s.wait_event_type, null, (pg_blocking_pids(s.pid))[1] FROM pg_stat_activity s JOIN pg_database d ON s.datid = d.oid AND NOT d.datistemplate"
+		query += "SELECT s.pid, s.datname, s.usename, s.query, s.state, extract(epoch from now()-s.query_start), null, s.wait_event_type, null, (pg_blocking_pids(s.pid))[1]"
 	case semver.MustParseRange(">=10.0.0")(c.version):
-		query = "SELECT s.pid, s.datname, s.usename, s.query, s.state, extract(epoch from (clock_timestamp()-s.query_start)), null, s.wait_event_type, s.backend_type, (pg_blocking_pids(s.pid))[1] FROM pg_stat_activity s JOIN pg_database d ON s.datid = d.oid AND NOT d.datistemplate"
+		query += "SELECT s.pid, s.datname, s.usename, s.query, s.state, extract(epoch from now()-s.query_start), null, s.wait_event_type, s.backend_type, (pg_blocking_pids(s.pid))[1]"
 	default:
 		return fmt.Errorf("postgres version %s is not supported", c.version)
 	}
+	query += " FROM pg_stat_activity s JOIN pg_database d ON s.datid = d.oid AND NOT d.datistemplate"
 	rows, err := c.db.Query(query)
 	if err != nil {
 		return err
@@ -80,7 +86,11 @@ func (c *Collector) callPgStatActivity(now time.Time, ch chan<- prometheus.Metri
 			awaitingQueriesByBlockingPid[s.blockingPid]++
 		}
 		sessionsCount[s.sessionId]++
-		if s.state == "active" && len(c.summaries) > 0 {
+
+		// Only queries that run at least since the previous scrape are taken into account, because
+		// Postgres statistics collector may receive a connection update event with a delay.
+		// In this case, the calculated query execution time will be higher than it actually is.
+		if s.state == "active" && secondsSinceLastCall > 0 && s.queryDuration > secondsSinceLastCall && len(c.summaries) > 0 {
 			summary, ok := c.summaries[s.queryKey]
 			if !ok {
 				for qk, summ := range c.summaries {

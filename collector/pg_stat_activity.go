@@ -5,126 +5,78 @@ import (
 	"fmt"
 	"github.com/blang/semver"
 	"github.com/coroot/coroot-pg-agent/obfuscate"
-	"github.com/prometheus/client_golang/prometheus"
 	"strings"
 	"time"
 )
 
-type sessionId struct {
-	queryKey
-	state         string
-	waitEventType string
+type Connection struct {
+	DB            sql.NullString
+	User          sql.NullString
+	Query         sql.NullString
+	State         sql.NullString
+	QueryStart    sql.NullTime
+	BackendType   sql.NullString
+	WaitEventType sql.NullString
+	BlockingPid   sql.NullInt32
 }
 
-type session struct {
-	sessionId
-	queryDuration float64
-	backendType   string
-	blockingPid   int
+func (c Connection) IsClientBackend() bool {
+	return c.BackendType.String == "" || c.BackendType.String == "client backend"
 }
 
-func (c *Collector) callPgStatActivity(now time.Time, ch chan<- prometheus.Metric) error {
-	var secondsSinceLastCall float64
-	if !c.prevStatActivityCallTs.IsZero() {
-		secondsSinceLastCall = now.Sub(c.prevStatActivityCallTs).Seconds()
-	}
-	c.prevStatActivityCallTs = now
+func (c Connection) QueryKey() QueryKey {
+	return QueryKey{Query: obfuscate.Sql(c.Query.String), User: c.User.String, DB: c.DB.String}
+}
+
+type saSnapshot struct {
+	ts          time.Time
+	connections map[int]Connection
+}
+
+func (c *Collector) getPgStatActivity() (*saSnapshot, error) {
+	snapshot := &saSnapshot{connections: map[int]Connection{}}
 	var query string
 	switch {
 	case semver.MustParseRange(">=9.3.0 <9.6.0")(c.version):
-		query += "SELECT s.pid, s.datname, s.usename, s.query, s.state, extract(epoch from now()-s.query_start), s.waiting, null, null, null"
+		query += "SELECT s.pid, s.datname, s.usename, s.query, s.state, now(), s.query_start, s.waiting, null, null, null"
 	case semver.MustParseRange(">=9.6.0 <10.0.0")(c.version):
-		query += "SELECT s.pid, s.datname, s.usename, s.query, s.state, extract(epoch from now()-s.query_start), null, s.wait_event_type, null, (pg_blocking_pids(s.pid))[1]"
+		query += "SELECT s.pid, s.datname, s.usename, s.query, s.state, now(), s.query_start, null, s.wait_event_type, null, (pg_blocking_pids(s.pid))[1]"
 	case semver.MustParseRange(">=10.0.0")(c.version):
-		query += "SELECT s.pid, s.datname, s.usename, s.query, s.state, extract(epoch from now()-s.query_start), null, s.wait_event_type, s.backend_type, (pg_blocking_pids(s.pid))[1]"
+		query += "SELECT s.pid, s.datname, s.usename, s.query, s.state, now(), s.query_start, null, s.wait_event_type, s.backend_type, (pg_blocking_pids(s.pid))[1]"
 	default:
-		return fmt.Errorf("postgres version %s is not supported", c.version)
+		return nil, fmt.Errorf("postgres version %s is not supported", c.version)
 	}
 	query += " FROM pg_stat_activity s JOIN pg_database d ON s.datid = d.oid AND NOT d.datistemplate"
 	rows, err := c.db.Query(query)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer rows.Close()
-	sessionsCount := map[sessionId]float64{}
-	sessionsByPid := map[int]session{}
-	awaitingQueriesByBlockingPid := map[int]float64{}
 
 	for rows.Next() {
 		var (
-			pid                                                int
-			db, user, query, state, backendType, waitEventType sql.NullString
-			queryDuration                                      sql.NullFloat64
-			oldStyleWaiting                                    sql.NullBool
-			blockingPid                                        sql.NullInt32
+			conn            Connection
+			pid             int
+			oldStyleWaiting sql.NullBool
 		)
-		err := rows.Scan(&pid, &db, &user, &query, &state, &queryDuration, &oldStyleWaiting, &waitEventType, &backendType, &blockingPid)
+		err := rows.Scan(
+			&pid, &conn.DB, &conn.User, &conn.Query, &conn.State, &snapshot.ts, &conn.QueryStart,
+			&oldStyleWaiting, &conn.WaitEventType, &conn.BackendType, &conn.BlockingPid,
+		)
 		if err != nil {
-			c.logger.Warning("failed to scan pg_stat_activity row", err)
+			c.logger.Warning("failed to scan pg_stat_activity row:", err)
 			continue
 		}
-		if db.String == "" || user.String == "" || state.String == "" {
+		if conn.DB.String == "" || conn.User.String == "" || conn.State.String == "" {
 			continue
-		}
-		s := session{
-			sessionId: sessionId{
-				queryKey:      queryKey{db: db.String, user: user.String},
-				waitEventType: waitEventType.String, state: state.String,
-			},
-			queryDuration: queryDuration.Float64,
-			blockingPid:   int(blockingPid.Int32),
-			backendType:   backendType.String,
 		}
 		if oldStyleWaiting.Bool {
-			s.waitEventType = "Lock"
+			conn.WaitEventType.String = "Lock"
 		}
-		if s.state == "active" || strings.HasPrefix(s.state, "idle in transaction") {
-			s.query = obfuscate.Sql(query.String)
+		if conn.State.String != "active" && !strings.HasPrefix(conn.State.String, "idle in transaction") {
+			conn.Query.String = ""
 		}
-		sessionsByPid[pid] = s
-		if s.blockingPid > 0 {
-			awaitingQueriesByBlockingPid[s.blockingPid]++
-		}
-		sessionsCount[s.sessionId]++
-
-		// Only queries that run at least since the previous scrape are taken into account, because
-		// Postgres statistics collector may receive a connection update event with a delay.
-		// In this case, the calculated query execution time will be higher than it actually is.
-		if s.state == "active" && secondsSinceLastCall > 0 && s.queryDuration > secondsSinceLastCall && len(c.summaries) > 0 {
-			summary, ok := c.summaries[s.queryKey]
-			if !ok {
-				for qk, summ := range c.summaries {
-					if qk.equalByQueryPrefix(s.queryKey) {
-						summary = summ
-						break
-					}
-				}
-				if summary == nil {
-					summary = newQuerySummary()
-					c.summaries[s.queryKey] = summary
-				}
-			}
-			summary.updateFromStatActivity(now, s)
-
-			dbSummary, ok := c.perDbSummaries[s.db]
-			if !ok {
-				dbSummary = newQuerySummary()
-				c.perDbSummaries[s.db] = dbSummary
-			}
-			dbSummary.updateFromStatActivity(now, s)
-		}
+		snapshot.connections[pid] = conn
 	}
-
-	for k, count := range sessionsCount {
-		ch <- gauge(dConnections, count, k.db, k.user, k.state, k.waitEventType, k.query)
-	}
-
-	for blockingPid, awaitingQueries := range awaitingQueriesByBlockingPid {
-		blocking, ok := sessionsByPid[blockingPid]
-		if !ok {
-			continue
-		}
-		ch <- gauge(dLockAwaitingQueries, awaitingQueries, blocking.db, blocking.user, blocking.query)
-	}
-	return nil
+	return snapshot, nil
 }

@@ -1,12 +1,13 @@
 package collector
 
 import (
+	"context"
 	"database/sql"
-	"fmt"
 	"github.com/blang/semver"
 	"github.com/coroot/logger"
 	_ "github.com/lib/pq"
 	"github.com/prometheus/client_golang/prometheus"
+	"strings"
 	"sync"
 	"time"
 )
@@ -22,40 +23,59 @@ var (
 
 	dConnections = desc("pg_connections", "Number of database connections", "db", "user", "state", "wait_event_type", "query")
 
-	dLatency = desc("pg_latency_seconds", "Query execution time", "quantile")
+	dLatency = desc("pg_latency_seconds", "Query execution time", "summary")
 
-	dDbQueries   = desc("pg_db_queries_total", "Total number of queries executed in the database", "db")
-	dDbTotalTime = desc("pg_db_query_time_seconds_total", "Total time spent executing queries in the database", "db")
+	dDbQueries = desc("pg_db_queries_per_second", "Number of queries executed in the database per second", "db")
 
-	dTopQueryCalls  = desc("pg_top_query_calls_total", "Total number of times the query was executed", "db", "user", "query")
-	dTopQueryTime   = desc("pg_top_query_time_seconds_total", "Total time spent executing the query", "db", "user", "query")
-	dTopQueryIOTime = desc("pg_top_query_io_time_seconds_total", "Total time the query spent awaiting IO", "db", "user", "query")
+	dTopQueryCalls  = desc("pg_top_query_calls_per_second", "Number of times the query was executed", "db", "user", "query")
+	dTopQueryTime   = desc("pg_top_query_time_per_second", "Time spent executing the query", "db", "user", "query")
+	dTopQueryIOTime = desc("pg_top_query_io_time_per_second", "Time the query spent awaiting IO", "db", "user", "query")
 
 	dLockAwaitingQueries = desc("pg_lock_awaiting_queries", "Number of queries awaiting a lock", "db", "user", "blocking_query")
 )
 
+type QueryKey struct {
+	Query string
+	DB    string
+	User  string
+}
+
+func (k QueryKey) EqualByQueryPrefix(other QueryKey) bool {
+	if k.User != other.User || k.DB != other.DB {
+		return false
+	}
+	if strings.HasPrefix(k.Query, other.Query) {
+		return true
+	}
+	return false
+}
+
+type ConnectionKey struct {
+	QueryKey
+	State         string
+	WaitEventType string
+}
+
 type Collector struct {
+	ctxCancelFunc context.CancelFunc
+
 	db      *sql.DB
 	version semver.Version
 
-	prevStatements map[statementId]ssRow
-	summaries      map[queryKey]*QuerySummary
-	perDbSummaries map[string]*QuerySummary
-	lock           sync.RWMutex
+	statsDumpInterval time.Duration
+	ssCurr            *ssSnapshot
+	ssPrev            *ssSnapshot
+	saCurr            *saSnapshot
+	saPrev            *saSnapshot
+	settings          []Setting
 
-	prevStatActivityCallTs time.Time
-
+	lock   sync.RWMutex
 	logger logger.Logger
 }
 
-func New(dsn string, logger logger.Logger) (*Collector, error) {
-	c := &Collector{
-		summaries:      map[queryKey]*QuerySummary{},
-		perDbSummaries: map[string]*QuerySummary{},
-		prevStatements: map[statementId]ssRow{},
-
-		logger: logger,
-	}
+func New(dsn string, scrapeInterval time.Duration, logger logger.Logger) (*Collector, error) {
+	ctx, cancelFunc := context.WithCancel(context.Background())
+	c := &Collector{logger: logger, ctxCancelFunc: cancelFunc}
 	var err error
 	c.db, err = sql.Open("postgres", dsn)
 	if err != nil {
@@ -65,10 +85,162 @@ func New(dsn string, logger logger.Logger) (*Collector, error) {
 	if err := c.db.Ping(); err != nil {
 		c.logger.Warning("probe failed:", err)
 	}
+	go func() {
+		ticker := time.NewTicker(scrapeInterval)
+		c.snapshot()
+		for {
+			select {
+			case <-ticker.C:
+				c.snapshot()
+			case <-ctx.Done():
+				c.logger.Info("stopping pg collector")
+				return
+			}
+		}
+	}()
 	return c, nil
 }
 
+func (c *Collector) snapshot() {
+	c.lock.Lock()
+	defer c.lock.Unlock()
+
+	var version string
+	err := c.db.QueryRow(`SELECT setting FROM pg_settings WHERE name='server_version'`).Scan(&version)
+	if err != nil {
+		c.logger.Warning(err)
+		return
+	}
+	ver, err := semver.ParseTolerant(strings.Fields(version)[0])
+	if err != nil {
+		c.logger.Warning(err)
+		return
+	}
+	c.version = ver
+
+	c.ssPrev = c.ssCurr
+	c.saPrev = c.saCurr
+	c.ssCurr, err = c.getStatStatements()
+	if err != nil {
+		c.logger.Warning(err)
+		return
+	}
+	c.saCurr, err = c.getPgStatActivity()
+	if err != nil {
+		c.logger.Warning(err)
+		return
+	}
+	if c.settings, err = c.getSettings(); err != nil {
+		c.logger.Warning(err)
+	}
+}
+
+func (c *Collector) summaries() (map[QueryKey]*QuerySummary, time.Duration) {
+	if c.saCurr == nil || c.saPrev == nil || c.ssCurr == nil || c.ssPrev == nil {
+		return nil, 0
+	}
+	res := map[QueryKey]*QuerySummary{}
+	getOrCreateSummary := func(k QueryKey, searchByPrefix bool) *QuerySummary {
+		s := res[k]
+		if s == nil && searchByPrefix {
+			for qk, ss := range res {
+				if qk.EqualByQueryPrefix(k) {
+					s = ss
+					break
+				}
+			}
+		}
+		if s == nil {
+			s = &QuerySummary{}
+			res[k] = s
+		}
+		return s
+	}
+
+	for id, r := range c.ssCurr.rows {
+		getOrCreateSummary(r.QueryKey(id), false).updateFromStatStatements(r, c.ssPrev.rows[id])
+	}
+	for _, conn := range c.saCurr.connections {
+		getOrCreateSummary(conn.QueryKey(), true).updateFromStatActivity(c.saPrev.ts, c.saCurr.ts, conn)
+	}
+	for pid, prev := range c.saPrev.connections {
+		if !prev.IsClientBackend() || prev.State.String != "active" {
+			continue
+		}
+		curr, ok := c.saCurr.connections[pid]
+		if ok && curr.State.String == "active" && curr.QueryStart.Time.Equal(prev.QueryStart.Time) { // still executing
+			continue
+		}
+		// prev query finished
+		getOrCreateSummary(prev.QueryKey(), true).correctFromPrevStatActivity(c.saPrev.ts, prev)
+	}
+	return res, c.ssCurr.ts.Sub(c.ssPrev.ts)
+}
+
+func (c *Collector) connectionMetrics(ch chan<- prometheus.Metric) {
+	if c.saCurr == nil {
+		return
+	}
+	byPid := map[int]Connection{}
+	awaitingQueriesByBlockingPid := map[int]float64{}
+	connectionsByKey := map[ConnectionKey]float64{}
+
+	for pid, conn := range c.saCurr.connections {
+		byPid[pid] = conn
+		if conn.BlockingPid.Int32 > 0 {
+			awaitingQueriesByBlockingPid[int(conn.BlockingPid.Int32)]++
+		}
+		key := ConnectionKey{
+			QueryKey:      conn.QueryKey(),
+			State:         conn.State.String,
+			WaitEventType: conn.WaitEventType.String,
+		}
+		connectionsByKey[key]++
+	}
+
+	for k, count := range connectionsByKey {
+		ch <- gauge(dConnections, count, k.DB, k.User, k.State, k.WaitEventType, k.Query)
+	}
+
+	for blockingPid, awaitingQueries := range awaitingQueriesByBlockingPid {
+		blocking, ok := byPid[blockingPid]
+		if !ok {
+			continue
+		}
+		ch <- gauge(dLockAwaitingQueries, awaitingQueries, blocking.DB.String, blocking.User.String, blocking.Query.String)
+	}
+}
+
+func (c *Collector) queryMetrics(ch chan<- prometheus.Metric) {
+	summaries, interval := c.summaries()
+	if summaries == nil {
+		c.logger.Warning("no summaries")
+		return
+	}
+
+	latency := NewLatencySummary()
+	queriesByDB := map[string]float64{}
+	for k, summary := range summaries {
+		latency.Add(summary.TotalTime, uint64(summary.Queries))
+		queriesByDB[k.DB] += summary.Queries
+	}
+	for s, v := range latency.GetSummaries(50, 75, 95, 99) {
+		ch <- gauge(dLatency, v, s)
+	}
+
+	for db, queries := range queriesByDB {
+		ch <- gauge(dDbQueries, queries/interval.Seconds(), db)
+	}
+
+	for k, summary := range top(summaries, topQueriesN) {
+		ch <- gauge(dTopQueryCalls, summary.Queries/interval.Seconds(), k.DB, k.User, k.Query)
+		ch <- gauge(dTopQueryTime, summary.TotalTime/interval.Seconds(), k.DB, k.User, k.Query)
+		ch <- gauge(dTopQueryIOTime, summary.IOTime/interval.Seconds(), k.DB, k.User, k.Query)
+	}
+}
+
 func (c *Collector) Close() error {
+	c.ctxCancelFunc()
 	return c.db.Close()
 }
 
@@ -81,61 +253,15 @@ func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 	}
 	ch <- gauge(dUp, 1)
 	ch <- gauge(dProbe, time.Since(now).Seconds())
-	if err := c.refreshVersion(); err != nil {
-		c.logger.Error("failed to get postgres version:", err)
-		return
-	}
 	ch <- gauge(dInfo, 1, c.version.String())
 
-	c.collectPgSettingsMetrics(ch)
+	c.lock.RLock()
+	defer c.lock.RUnlock()
 
-	c.lock.Lock()
-	defer c.lock.Unlock()
-	now = time.Now()
-	for _, s := range c.summaries {
-		s.resetTemporaryValues()
-	}
-	for _, s := range c.perDbSummaries {
-		s.resetTemporaryValues()
-	}
-
-	if err := c.callPgStatStatements(now); err != nil {
-		c.logger.Error("failed to query pg_stat_statements:", err)
-		return
-	}
-	if err := c.callPgStatActivity(now, ch); err != nil {
-		c.logger.Error("failed to query pg_stat_activity:", err)
-		return
-	}
-
-	latencySummary := NewLatencySummary()
-	for _, summary := range c.summaries {
-		latencySummary.Add(summary.lastTotalTimeDelta, uint64(summary.lastCallsDelta))
-	}
-	for q, v := range latencySummary.GetQuantiles(0.5, 0.95, 0.99) {
-		ch <- gauge(dLatency, v, fmt.Sprintf("%.2f", q))
-	}
-
-	for db, summary := range c.perDbSummaries {
-		ch <- counter(dDbQueries, summary.calls.value(), db)
-		ch <- counter(dDbTotalTime, summary.totalTime.value(), db)
-	}
-
-	for k, summary := range top(c.summaries, topQueriesN) {
-		ch <- counter(dTopQueryCalls, summary.calls.value(), k.db, k.user, k.query)
-		ch <- counter(dTopQueryTime, summary.totalTime.value(), k.db, k.user, k.query)
-		ch <- counter(dTopQueryIOTime, summary.ioTime.value(), k.db, k.user, k.query)
-	}
-
-	for db, s := range c.perDbSummaries {
-		if s.lastSeen.Before(now) {
-			delete(c.perDbSummaries, db)
-		}
-	}
-	for key, s := range c.summaries {
-		if s.lastSeen.Before(now) {
-			delete(c.summaries, key)
-		}
+	c.connectionMetrics(ch)
+	c.queryMetrics(ch)
+	for _, s := range c.settings {
+		ch <- gauge(dSettings, s.Value, s.Name, s.Unit)
 	}
 }
 
@@ -151,7 +277,6 @@ func (c *Collector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- dTopQueryTime
 	ch <- dTopQueryIOTime
 	ch <- dDbQueries
-	ch <- dDbTotalTime
 }
 
 func desc(name, help string, labels ...string) *prometheus.Desc {
@@ -160,8 +285,4 @@ func desc(name, help string, labels ...string) *prometheus.Desc {
 
 func gauge(desc *prometheus.Desc, value float64, labels ...string) prometheus.Metric {
 	return prometheus.MustNewConstMetric(desc, prometheus.GaugeValue, value, labels...)
-}
-
-func counter(desc *prometheus.Desc, value float64, labels ...string) prometheus.Metric {
-	return prometheus.MustNewConstMetric(desc, prometheus.CounterValue, value, labels...)
 }

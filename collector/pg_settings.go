@@ -2,17 +2,23 @@ package collector
 
 import (
 	"database/sql"
-	"github.com/prometheus/client_golang/prometheus"
 	"strconv"
 )
 
-func (c *Collector) collectPgSettingsMetrics(ch chan<- prometheus.Metric) {
+type Setting struct {
+	Name  string
+	Unit  string
+	Value float64
+}
+
+func (c *Collector) getSettings() ([]Setting, error) {
 	rows, err := c.db.Query(`SELECT name, setting, unit, vartype FROM pg_settings WHERE vartype in ('integer','real', 'bool')`)
 	if err != nil {
-		c.logger.Warning("failed to query pg_settings:", err)
-		return
+		return nil, err
 	}
 	defer rows.Close()
+
+	var res []Setting
 	for rows.Next() {
 		var name, value, unit, vartype sql.NullString
 		err := rows.Scan(&name, &value, &unit, &vartype)
@@ -35,6 +41,7 @@ func (c *Collector) collectPgSettingsMetrics(ch chan<- prometheus.Metric) {
 		default:
 			continue
 		}
-		ch <- gauge(dSettings, v, name.String, unit.String)
+		res = append(res, Setting{Name: name.String, Unit: unit.String, Value: v})
 	}
+	return res, nil
 }

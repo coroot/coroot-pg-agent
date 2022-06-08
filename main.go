@@ -15,13 +15,15 @@ var version = "unknown"
 func main() {
 	dsn := kingpin.Arg("dsn", `Data source name (env: DSN) - "postgresql://<user>:<password>@<host>:5432/postgres?connect_timeout=1&statement_timeout=30000".`).Envar("DSN").Required().String()
 	listen := kingpin.Flag("listen", `Listen address (env: LISTEN) - "<ip>:<port>" or ":<port>".`).Envar("LISTEN").Default("0.0.0.0:80").String()
+	scrapeInterval := kingpin.Flag("scrape-interval", `How often to snapshot system views`).Envar("PG_SCRAPE_INTERVAL").Default("15s").Duration()
+
 	kingpin.HelpFlag.Short('h').Hidden()
 	kingpin.Version(version)
 	kingpin.Parse()
 
 	log := logger.NewKlog("")
 
-	c, err := collector.New(*dsn, log)
+	c, err := collector.New(*dsn, *scrapeInterval, log)
 	if err != nil {
 		log.Error(err)
 		return

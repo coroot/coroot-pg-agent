@@ -181,17 +181,18 @@ func (c *Collector) connectionMetrics(ch chan<- prometheus.Metric) {
 	if c.saCurr == nil {
 		return
 	}
-	byPid := map[int]Connection{}
+	byPid := map[int]QueryKey{}
 	awaitingQueriesByBlockingPid := map[int]float64{}
 	connectionsByKey := map[ConnectionKey]float64{}
 
 	for pid, conn := range c.saCurr.connections {
-		byPid[pid] = conn
+		queryKey := conn.QueryKey()
+		byPid[pid] = queryKey
 		if conn.BlockingPid.Int32 > 0 {
 			awaitingQueriesByBlockingPid[int(conn.BlockingPid.Int32)]++
 		}
 		key := ConnectionKey{
-			QueryKey:      conn.QueryKey(),
+			QueryKey:      queryKey,
 			State:         conn.State.String,
 			WaitEventType: conn.WaitEventType.String,
 		}
@@ -202,12 +203,16 @@ func (c *Collector) connectionMetrics(ch chan<- prometheus.Metric) {
 		ch <- gauge(dConnections, count, k.DB, k.User, k.State, k.WaitEventType, k.Query)
 	}
 
+	awaitingQueriesByBlockingQuery := map[QueryKey]float64{}
 	for blockingPid, awaitingQueries := range awaitingQueriesByBlockingPid {
-		blocking, ok := byPid[blockingPid]
+		blockingQuery, ok := byPid[blockingPid]
 		if !ok {
 			continue
 		}
-		ch <- gauge(dLockAwaitingQueries, awaitingQueries, blocking.DB.String, blocking.User.String, blocking.Query.String)
+		awaitingQueriesByBlockingQuery[blockingQuery] += awaitingQueries
+	}
+	for blockingQuery, awaitingQueries := range awaitingQueriesByBlockingQuery {
+		ch <- gauge(dLockAwaitingQueries, awaitingQueries, blockingQuery.DB, blockingQuery.User, blockingQuery.Query)
 	}
 }
 

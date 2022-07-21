@@ -106,7 +106,7 @@ func (c *Collector) snapshot() {
 	defer c.lock.Unlock()
 
 	var version string
-	err := c.db.QueryRow(`SELECT setting FROM pg_settings WHERE name='server_version'`).Scan(&version)
+	err := c.db.QueryRow(`SELECT regexp_replace(setting,'[^0-9.].*','') setting FROM pg_settings WHERE name='server_version'`).Scan(&version)
 	if err != nil {
 		c.logger.Warning(err)
 		return

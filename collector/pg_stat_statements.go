@@ -31,16 +31,16 @@ type ssSnapshot struct {
 	rows map[statementId]ssRow
 }
 
-func (c *Collector) getStatStatements() (*ssSnapshot, error) {
+func (c *Collector) getStatStatements(version semver.Version) (*ssSnapshot, error) {
 	snapshot := &ssSnapshot{ts: time.Now(), rows: map[statementId]ssRow{}}
 	var query string
 	switch {
-	case semver.MustParseRange(">=9.4.0 <13.0.0")(c.version):
+	case semver.MustParseRange(">=9.4.0 <13.0.0")(version):
 		query = `SELECT d.datname, r.rolname, s.query, s.queryid, s.calls, s.total_time, s.blk_read_time + s.blk_write_time`
-	case semver.MustParseRange(">=13.0.0")(c.version):
+	case semver.MustParseRange(">=13.0.0")(version):
 		query = `SELECT d.datname, r.rolname, s.query, s.queryid, s.calls, s.total_plan_time + s.total_exec_time, s.blk_read_time + s.blk_write_time`
 	default:
-		return nil, fmt.Errorf("postgres version %s is not supported", c.version)
+		return nil, fmt.Errorf("postgres version %s is not supported", version)
 	}
 	query += ` FROM pg_stat_statements s JOIN pg_roles r ON r.oid=s.userid JOIN pg_database d ON d.oid=s.dbid AND NOT d.datistemplate`
 	rows, err := c.db.Query(query)

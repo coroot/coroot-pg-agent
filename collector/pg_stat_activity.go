@@ -33,18 +33,18 @@ type saSnapshot struct {
 	connections map[int]Connection
 }
 
-func (c *Collector) getPgStatActivity() (*saSnapshot, error) {
+func (c *Collector) getPgStatActivity(version semver.Version) (*saSnapshot, error) {
 	snapshot := &saSnapshot{connections: map[int]Connection{}}
 	var query string
 	switch {
-	case semver.MustParseRange(">=9.3.0 <9.6.0")(c.version):
+	case semver.MustParseRange(">=9.3.0 <9.6.0")(version):
 		query += "SELECT s.pid, s.datname, s.usename, s.query, s.state, now(), s.query_start, s.waiting, null, null, null"
-	case semver.MustParseRange(">=9.6.0 <10.0.0")(c.version):
+	case semver.MustParseRange(">=9.6.0 <10.0.0")(version):
 		query += "SELECT s.pid, s.datname, s.usename, s.query, s.state, now(), s.query_start, null, s.wait_event_type, null, (pg_blocking_pids(s.pid))[1]"
-	case semver.MustParseRange(">=10.0.0")(c.version):
+	case semver.MustParseRange(">=10.0.0")(version):
 		query += "SELECT s.pid, s.datname, s.usename, s.query, s.state, now(), s.query_start, null, s.wait_event_type, s.backend_type, (pg_blocking_pids(s.pid))[1]"
 	default:
-		return nil, fmt.Errorf("postgres version %s is not supported", c.version)
+		return nil, fmt.Errorf("postgres version %s is not supported", version)
 	}
 	query += " FROM pg_stat_activity s JOIN pg_database d ON s.datid = d.oid AND NOT d.datistemplate"
 	rows, err := c.db.Query(query)

@@ -59,8 +59,8 @@ type ConnectionKey struct {
 type Collector struct {
 	ctxCancelFunc context.CancelFunc
 
-	db      *sql.DB
-	version semver.Version
+	db          *sql.DB
+	origVersion string
 
 	statsDumpInterval time.Duration
 	ssCurr            *ssSnapshot
@@ -105,27 +105,27 @@ func (c *Collector) snapshot() {
 	c.lock.Lock()
 	defer c.lock.Unlock()
 
-	var version string
-	err := c.db.QueryRow(`SELECT regexp_replace(setting,'[^0-9.].*','') setting FROM pg_settings WHERE name='server_version'`).Scan(&version)
+	c.origVersion = ""
+	var version semver.Version
+	var rawVersion string
+	err := c.db.QueryRow(`SELECT setting FROM pg_settings WHERE name='server_version'`).Scan(&rawVersion)
 	if err != nil {
 		c.logger.Warning(err)
 		return
 	}
-	ver, err := semver.ParseTolerant(strings.Fields(version)[0])
+	c.origVersion, version, err = parsePgVersion(rawVersion)
 	if err != nil {
 		c.logger.Warning(err)
 		return
 	}
-	c.version = ver
-
 	c.ssPrev = c.ssCurr
 	c.saPrev = c.saCurr
-	c.ssCurr, err = c.getStatStatements()
+	c.ssCurr, err = c.getStatStatements(version)
 	if err != nil {
 		c.logger.Warning(err)
 		return
 	}
-	c.saCurr, err = c.getPgStatActivity()
+	c.saCurr, err = c.getPgStatActivity(version)
 	if err != nil {
 		c.logger.Warning(err)
 		return
@@ -258,7 +258,9 @@ func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 	}
 	ch <- gauge(dUp, 1)
 	ch <- gauge(dProbe, time.Since(now).Seconds())
-	ch <- gauge(dInfo, 1, c.version.String())
+	if c.origVersion != "" {
+		ch <- gauge(dInfo, 1, c.origVersion)
+	}
 
 	c.lock.RLock()
 	defer c.lock.RUnlock()

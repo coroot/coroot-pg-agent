@@ -6,7 +6,6 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"gopkg.in/alecthomas/kingpin.v2"
-	"k8s.io/klog/v2"
 	"net/http"
 	_ "net/http/pprof"
 )
@@ -33,7 +32,7 @@ func main() {
 
 	registry := prometheus.NewRegistry()
 
-	klog.Infoln("static labels:", *staticLabels)
+	log.Info("static labels:", *staticLabels)
 	registerer := prometheus.WrapRegistererWith(*staticLabels, registry)
 	registerer.MustRegister(info("pg_agent_info", version))
 	registerer.MustRegister(c)

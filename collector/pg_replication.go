@@ -1,0 +1,62 @@
+package collector
+
+import (
+	"database/sql"
+	"errors"
+	"fmt"
+	"github.com/blang/semver"
+)
+
+type ReplicationStatus struct {
+	CurrentLsn sql.NullInt64
+	ReceiveLsn sql.NullInt64
+	ReplyLsn   sql.NullInt64
+
+	PrimaryConnectionInfo   sql.NullString
+	PrimaryConnectionStatus sql.NullInt64
+}
+
+func (c *Collector) getReplicationStatus(version semver.Version) (ReplicationStatus, error) {
+	var res ReplicationStatus
+	var isReplica sql.NullBool
+	if err := c.db.QueryRow(`SELECT pg_is_in_recovery()`).Scan(&isReplica); err != nil {
+		return res, err
+	}
+
+	if !isReplica.Valid {
+		return res, fmt.Errorf("pg_is_in_recovery() returned null")
+	}
+
+	var fCurrentLsn, fReceiveLsn, fReplyLsn string
+	switch {
+	case semver.MustParseRange(">=9.4.0 <10.0.0")(version):
+		fCurrentLsn = "pg_current_xlog_location"
+		fReceiveLsn = "pg_last_xlog_receive_location"
+		fReplyLsn = "pg_last_xlog_replay_location"
+	case semver.MustParseRange(">=10.0.0")(version):
+		fCurrentLsn = "pg_current_wal_lsn"
+		fReceiveLsn = "pg_last_wal_receive_lsn"
+		fReplyLsn = "pg_last_wal_replay_lsn"
+	default:
+		return res, fmt.Errorf("postgres version %s is not supported", version)
+	}
+
+	if isReplica.Bool {
+		if err := c.db.QueryRow(fmt.Sprintf(`SELECT %s()-'0/0', %s()-'0/0'`, fReceiveLsn, fReplyLsn)).Scan(&res.ReceiveLsn, &res.ReplyLsn); err != nil {
+			return res, err
+		}
+		if err := c.db.QueryRow(`SELECT count(1) FROM pg_stat_wal_receiver`).Scan(&res.PrimaryConnectionStatus); err != nil {
+			return res, err
+		}
+		if err := c.db.QueryRow(`SELECT setting FROM pg_settings WHERE name='primary_conninfo'`).Scan(&res.PrimaryConnectionInfo); err != nil {
+			if !errors.Is(err, sql.ErrNoRows) {
+				return res, err
+			}
+		}
+	} else {
+		if err := c.db.QueryRow(fmt.Sprintf(`SELECT %s()-'0/0'`, fCurrentLsn)).Scan(&res.CurrentLsn); err != nil {
+			return res, err
+		}
+	}
+	return res, nil
+}

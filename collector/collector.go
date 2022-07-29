@@ -34,6 +34,7 @@ var (
 	dLockAwaitingQueries = desc("pg_lock_awaiting_queries", "Number of queries awaiting a lock", "db", "user", "blocking_query")
 
 	dWalReceiverStatus = desc("pg_wal_receiver_status", "WAL receiver status: 1 if the receiver is connected, otherwise 0", "sender_host", "sender_port")
+	dWalReplayPaused   = desc("pg_wal_replay_paused", "Whether WAL replay paused or not")
 	dWalCurrentLsn     = desc("pg_wal_current_lsn", "Current WAL sequence number")
 	dWalReceiveLsn     = desc("pg_wal_receive_lsn", "WAL sequence number that has been received and synced to disk by streaming replication")
 	dWalReplyLsn       = desc("pg_wal_reply_lsn", "WAL sequence number that has been replayed during recovery")
@@ -306,6 +307,13 @@ func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 			}
 			ch <- gauge(dWalReceiverStatus, float64(rs.PrimaryConnectionStatus.Int64), host, port)
 		}
+		if rs.IsReplayPaused.Valid {
+			value := 0.0
+			if rs.IsReplayPaused.Bool {
+				value = 1.0
+			}
+			ch <- gauge(dWalReplayPaused, value)
+		}
 	}
 }
 
@@ -322,6 +330,7 @@ func (c *Collector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- dTopQueryIOTime
 	ch <- dDbQueries
 	ch <- dWalReceiverStatus
+	ch <- dWalReplayPaused
 	ch <- dWalCurrentLsn
 	ch <- dWalReceiveLsn
 	ch <- dWalReplyLsn

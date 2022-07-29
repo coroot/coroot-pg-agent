@@ -7,7 +7,7 @@ import (
 	"github.com/blang/semver"
 )
 
-type ReplicationStatus struct {
+type replicationStatus struct {
 	CurrentLsn sql.NullInt64
 	ReceiveLsn sql.NullInt64
 	ReplyLsn   sql.NullInt64
@@ -16,15 +16,14 @@ type ReplicationStatus struct {
 	PrimaryConnectionStatus sql.NullInt64
 }
 
-func (c *Collector) getReplicationStatus(version semver.Version) (ReplicationStatus, error) {
-	var res ReplicationStatus
+func (c *Collector) getReplicationStatus(version semver.Version) (*replicationStatus, error) {
 	var isReplica sql.NullBool
 	if err := c.db.QueryRow(`SELECT pg_is_in_recovery()`).Scan(&isReplica); err != nil {
-		return res, err
+		return nil, err
 	}
 
 	if !isReplica.Valid {
-		return res, fmt.Errorf("pg_is_in_recovery() returned null")
+		return nil, fmt.Errorf("pg_is_in_recovery() returned null")
 	}
 
 	var fCurrentLsn, fReceiveLsn, fReplyLsn string
@@ -38,25 +37,26 @@ func (c *Collector) getReplicationStatus(version semver.Version) (ReplicationSta
 		fReceiveLsn = "pg_last_wal_receive_lsn"
 		fReplyLsn = "pg_last_wal_replay_lsn"
 	default:
-		return res, fmt.Errorf("postgres version %s is not supported", version)
+		return nil, fmt.Errorf("postgres version %s is not supported", version)
 	}
 
+	var res replicationStatus
 	if isReplica.Bool {
 		if err := c.db.QueryRow(fmt.Sprintf(`SELECT %s()-'0/0', %s()-'0/0'`, fReceiveLsn, fReplyLsn)).Scan(&res.ReceiveLsn, &res.ReplyLsn); err != nil {
-			return res, err
+			return nil, err
 		}
 		if err := c.db.QueryRow(`SELECT count(1) FROM pg_stat_wal_receiver`).Scan(&res.PrimaryConnectionStatus); err != nil {
-			return res, err
+			return nil, err
 		}
 		if err := c.db.QueryRow(`SELECT setting FROM pg_settings WHERE name='primary_conninfo'`).Scan(&res.PrimaryConnectionInfo); err != nil {
 			if !errors.Is(err, sql.ErrNoRows) {
-				return res, err
+				return nil, err
 			}
 		}
 	} else {
 		if err := c.db.QueryRow(fmt.Sprintf(`SELECT %s()-'0/0'`, fCurrentLsn)).Scan(&res.CurrentLsn); err != nil {
-			return res, err
+			return nil, err
 		}
 	}
-	return res, nil
+	return &res, nil
 }

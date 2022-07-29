@@ -33,7 +33,7 @@ var (
 
 	dLockAwaitingQueries = desc("pg_lock_awaiting_queries", "Number of queries awaiting a lock", "db", "user", "blocking_query")
 
-	dWalReceiverStatus = desc("pg_wal_receiver_status", "WAL receiver status: 1 if the receiver is connected, otherwise 0", "sender")
+	dWalReceiverStatus = desc("pg_wal_receiver_status", "WAL receiver status: 1 if the receiver is connected, otherwise 0", "sender_host", "sender_port")
 	dWalCurrentLsn     = desc("pg_wal_current_lsn", "Current WAL sequence number")
 	dWalReceiveLsn     = desc("pg_wal_receive_lsn", "WAL sequence number that has been received and synced to disk by streaming replication")
 	dWalReplyLsn       = desc("pg_wal_reply_lsn", "WAL sequence number that has been replayed during recovery")
@@ -73,7 +73,7 @@ type Collector struct {
 	saCurr            *saSnapshot
 	saPrev            *saSnapshot
 	settings          []Setting
-	replicationStatus ReplicationStatus
+	replicationStatus *replicationStatus
 
 	lock   sync.RWMutex
 	logger logger.Logger
@@ -124,6 +124,15 @@ func (c *Collector) snapshot() {
 		c.logger.Warning(err)
 		return
 	}
+
+	if c.settings, err = c.getSettings(); err != nil {
+		c.logger.Warning(err)
+	}
+
+	if c.replicationStatus, err = c.getReplicationStatus(version); err != nil {
+		c.logger.Warning(err)
+	}
+
 	c.ssPrev = c.ssCurr
 	c.saPrev = c.saCurr
 	c.ssCurr, err = c.getStatStatements(version)
@@ -135,12 +144,6 @@ func (c *Collector) snapshot() {
 	if err != nil {
 		c.logger.Warning(err)
 		return
-	}
-	if c.settings, err = c.getSettings(); err != nil {
-		c.logger.Warning(err)
-	}
-	if c.replicationStatus, err = c.getReplicationStatus(version); err != nil {
-		c.logger.Warning(err)
 	}
 }
 
@@ -279,31 +282,30 @@ func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 	for _, s := range c.settings {
 		ch <- gauge(dSettings, s.Value, s.Name, s.Unit)
 	}
-	rs := c.replicationStatus
-	if rs.CurrentLsn.Valid {
-		ch <- counter(dWalCurrentLsn, float64(rs.CurrentLsn.Int64))
-	}
-	if rs.ReceiveLsn.Valid {
-		ch <- counter(dWalReceiveLsn, float64(rs.ReceiveLsn.Int64))
-	}
-	if rs.ReplyLsn.Valid {
-		ch <- counter(dWalReplyLsn, float64(rs.ReplyLsn.Int64))
-	}
-	if rs.PrimaryConnectionStatus.Valid {
-		var host, port string
-		for _, f := range strings.Fields(rs.PrimaryConnectionInfo.String) {
-			if strings.HasPrefix(f, "host=") {
-				host = f[len("host="):]
-			}
-			if strings.HasPrefix(f, "port=") {
-				port = f[len("port="):]
-			}
+
+	if c.replicationStatus != nil {
+		rs := c.replicationStatus
+		if rs.CurrentLsn.Valid {
+			ch <- counter(dWalCurrentLsn, float64(rs.CurrentLsn.Int64))
 		}
-		sender := ""
-		if host != "" && port != "" {
-			sender = host + ":" + port
+		if rs.ReceiveLsn.Valid {
+			ch <- counter(dWalReceiveLsn, float64(rs.ReceiveLsn.Int64))
 		}
-		ch <- gauge(dWalReceiverStatus, float64(rs.PrimaryConnectionStatus.Int64), sender)
+		if rs.ReplyLsn.Valid {
+			ch <- counter(dWalReplyLsn, float64(rs.ReplyLsn.Int64))
+		}
+		if rs.PrimaryConnectionStatus.Valid {
+			var host, port string
+			for _, f := range strings.Fields(rs.PrimaryConnectionInfo.String) {
+				if strings.HasPrefix(f, "host=") {
+					host = f[len("host="):]
+				}
+				if strings.HasPrefix(f, "port=") {
+					port = f[len("port="):]
+				}
+			}
+			ch <- gauge(dWalReceiverStatus, float64(rs.PrimaryConnectionStatus.Int64), host, port)
+		}
 	}
 }
 
@@ -319,6 +321,10 @@ func (c *Collector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- dTopQueryTime
 	ch <- dTopQueryIOTime
 	ch <- dDbQueries
+	ch <- dWalReceiverStatus
+	ch <- dWalCurrentLsn
+	ch <- dWalReceiveLsn
+	ch <- dWalReplyLsn
 }
 
 func desc(name, help string, labels ...string) *prometheus.Desc {

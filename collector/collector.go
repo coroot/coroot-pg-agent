@@ -286,33 +286,21 @@ func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 
 	if c.replicationStatus != nil {
 		rs := c.replicationStatus
-		if rs.CurrentLsn.Valid {
-			ch <- counter(dWalCurrentLsn, float64(rs.CurrentLsn.Int64))
-		}
-		if rs.ReceiveLsn.Valid {
-			ch <- counter(dWalReceiveLsn, float64(rs.ReceiveLsn.Int64))
-		}
-		if rs.ReplyLsn.Valid {
-			ch <- counter(dWalReplyLsn, float64(rs.ReplyLsn.Int64))
-		}
-		if rs.PrimaryConnectionStatus.Valid {
-			var host, port string
-			for _, f := range strings.Fields(rs.PrimaryConnectionInfo.String) {
-				if strings.HasPrefix(f, "host=") {
-					host = f[len("host="):]
-				}
-				if strings.HasPrefix(f, "port=") {
-					port = f[len("port="):]
-				}
+		if rs.isInRecovery {
+			ch <- counter(dWalReceiveLsn, float64(rs.receiveLsn))
+			ch <- counter(dWalReplyLsn, float64(rs.replyLsn))
+			isReplayPaused := 0.0
+			if rs.isReplayPaused {
+				isReplayPaused = 1.0
 			}
-			ch <- gauge(dWalReceiverStatus, float64(rs.PrimaryConnectionStatus.Int64), host, port)
-		}
-		if rs.IsReplayPaused.Valid {
-			value := 0.0
-			if rs.IsReplayPaused.Bool {
-				value = 1.0
+			ch <- gauge(dWalReplayPaused, isReplayPaused)
+			host, port, err := rs.primaryHostPort()
+			if err != nil {
+				c.logger.Warning(err)
 			}
-			ch <- gauge(dWalReplayPaused, value)
+			ch <- gauge(dWalReceiverStatus, float64(rs.walReceiverStatus), host, port)
+		} else {
+			ch <- counter(dWalCurrentLsn, float64(rs.currentLsn))
 		}
 	}
 }

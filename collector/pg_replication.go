@@ -5,31 +5,71 @@ import (
 	"errors"
 	"fmt"
 	"github.com/blang/semver"
+	"net/url"
+	"regexp"
+	"strings"
 )
 
-type replicationStatus struct {
-	CurrentLsn     sql.NullInt64
-	ReceiveLsn     sql.NullInt64
-	ReplyLsn       sql.NullInt64
-	IsReplayPaused sql.NullBool
+var (
+	valueRe    = `\s*=[\s']*([^\s']+)`
+	hostRe     = regexp.MustCompile("host" + valueRe)
+	hostaddrRe = regexp.MustCompile("hostaddr" + valueRe)
+	portRe     = regexp.MustCompile("port" + valueRe)
+)
 
-	PrimaryConnectionInfo   sql.NullString
-	PrimaryConnectionStatus sql.NullInt64
+func findValue(src string, re *regexp.Regexp) string {
+	res := re.FindStringSubmatch(src)
+	if len(res) < 2 {
+		return ""
+	}
+	return res[1]
+}
+
+type replicationStatus struct {
+	isInRecovery bool
+
+	currentLsn int64
+	receiveLsn int64
+	replyLsn   int64
+
+	isReplayPaused bool
+
+	walReceiverStatus     int64
+	primaryConnectionInfo string
+}
+
+func (rs *replicationStatus) primaryHostPort() (string, string, error) {
+	ci := rs.primaryConnectionInfo
+	if strings.HasPrefix(ci, "postgres://") || strings.HasPrefix(ci, "postgresql://") {
+		u, err := url.Parse(ci)
+		if err != nil {
+			// don't log url.Parse errors since they might contain security sensitive data
+			return "", "", fmt.Errorf("failed to parse primary_conninfo")
+		}
+		return u.Hostname(), u.Port(), nil
+	}
+	host := findValue(ci, hostRe)
+	if host == "" {
+		host = findValue(ci, hostaddrRe)
+	}
+	port := findValue(ci, portRe)
+	return host, port, nil
 }
 
 func (c *Collector) getReplicationStatus(version semver.Version) (*replicationStatus, error) {
-	var isReplica sql.NullBool
-	if err := c.db.QueryRow(`SELECT pg_is_in_recovery()`).Scan(&isReplica); err != nil {
+	var isInRecovery sql.NullBool
+	if err := c.db.QueryRow(`SELECT pg_is_in_recovery()`).Scan(&isInRecovery); err != nil {
 		return nil, err
 	}
 
-	if !isReplica.Valid {
+	if !isInRecovery.Valid {
 		return nil, fmt.Errorf("pg_is_in_recovery() returned null")
 	}
 
 	var fCurrentLsn, fReceiveLsn, fReplyLsn, fIsReplayPaused string
 	switch {
-	case semver.MustParseRange(">=9.4.0 <10.0.0")(version):
+	// the `pg_stat_wal_receiver` view has been introduced in 9.6
+	case semver.MustParseRange(">=9.6.0 <10.0.0")(version):
 		fCurrentLsn = "pg_current_xlog_location"
 		fReceiveLsn = "pg_last_xlog_receive_location"
 		fReplyLsn = "pg_last_xlog_replay_location"
@@ -43,25 +83,25 @@ func (c *Collector) getReplicationStatus(version semver.Version) (*replicationSt
 		return nil, fmt.Errorf("postgres version %s is not supported", version)
 	}
 
-	var res replicationStatus
-	if isReplica.Bool {
+	rs := &replicationStatus{isInRecovery: isInRecovery.Bool}
+	if rs.isInRecovery {
 		if err := c.db.QueryRow(fmt.Sprintf(
 			`SELECT %s()-'0/0', %s()-'0/0', %s()`, fReceiveLsn, fReplyLsn, fIsReplayPaused)).Scan(
-			&res.ReceiveLsn, &res.ReplyLsn, &res.IsReplayPaused); err != nil {
+			&rs.receiveLsn, &rs.replyLsn, &rs.isReplayPaused); err != nil {
 			return nil, err
 		}
-		if err := c.db.QueryRow(`SELECT count(1) FROM pg_stat_wal_receiver`).Scan(&res.PrimaryConnectionStatus); err != nil {
+		if err := c.db.QueryRow(`SELECT count(1) FROM pg_stat_wal_receiver`).Scan(&rs.walReceiverStatus); err != nil {
 			return nil, err
 		}
-		if err := c.db.QueryRow(`SELECT setting FROM pg_settings WHERE name='primary_conninfo'`).Scan(&res.PrimaryConnectionInfo); err != nil {
+		if err := c.db.QueryRow(`SELECT setting FROM pg_settings WHERE name='primary_conninfo'`).Scan(&rs.primaryConnectionInfo); err != nil {
 			if !errors.Is(err, sql.ErrNoRows) {
 				return nil, err
 			}
 		}
 	} else {
-		if err := c.db.QueryRow(fmt.Sprintf(`SELECT %s()-'0/0'`, fCurrentLsn)).Scan(&res.CurrentLsn); err != nil {
+		if err := c.db.QueryRow(fmt.Sprintf(`SELECT %s()-'0/0'`, fCurrentLsn)).Scan(&rs.currentLsn); err != nil {
 			return nil, err
 		}
 	}
-	return &res, nil
+	return rs, nil
 }

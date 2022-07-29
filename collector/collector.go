@@ -32,6 +32,12 @@ var (
 	dTopQueryIOTime = desc("pg_top_query_io_time_per_second", "Time the query spent awaiting IO", "db", "user", "query")
 
 	dLockAwaitingQueries = desc("pg_lock_awaiting_queries", "Number of queries awaiting a lock", "db", "user", "blocking_query")
+
+	dWalReceiverStatus = desc("pg_wal_receiver_status", "WAL receiver status: 1 if the receiver is connected, otherwise 0", "sender_host", "sender_port")
+	dWalReplayPaused   = desc("pg_wal_replay_paused", "Whether WAL replay paused or not")
+	dWalCurrentLsn     = desc("pg_wal_current_lsn", "Current WAL sequence number")
+	dWalReceiveLsn     = desc("pg_wal_receive_lsn", "WAL sequence number that has been received and synced to disk by streaming replication")
+	dWalReplyLsn       = desc("pg_wal_reply_lsn", "WAL sequence number that has been replayed during recovery")
 )
 
 type QueryKey struct {
@@ -68,6 +74,7 @@ type Collector struct {
 	saCurr            *saSnapshot
 	saPrev            *saSnapshot
 	settings          []Setting
+	replicationStatus *replicationStatus
 
 	lock   sync.RWMutex
 	logger logger.Logger
@@ -118,6 +125,15 @@ func (c *Collector) snapshot() {
 		c.logger.Warning(err)
 		return
 	}
+
+	if c.settings, err = c.getSettings(); err != nil {
+		c.logger.Warning(err)
+	}
+
+	if c.replicationStatus, err = c.getReplicationStatus(version); err != nil {
+		c.logger.Warning(err)
+	}
+
 	c.ssPrev = c.ssCurr
 	c.saPrev = c.saCurr
 	c.ssCurr, err = c.getStatStatements(version)
@@ -129,9 +145,6 @@ func (c *Collector) snapshot() {
 	if err != nil {
 		c.logger.Warning(err)
 		return
-	}
-	if c.settings, err = c.getSettings(); err != nil {
-		c.logger.Warning(err)
 	}
 }
 
@@ -270,6 +283,26 @@ func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 	for _, s := range c.settings {
 		ch <- gauge(dSettings, s.Value, s.Name, s.Unit)
 	}
+
+	if c.replicationStatus != nil {
+		rs := c.replicationStatus
+		if rs.isInRecovery {
+			ch <- counter(dWalReceiveLsn, float64(rs.receiveLsn))
+			ch <- counter(dWalReplyLsn, float64(rs.replyLsn))
+			isReplayPaused := 0.0
+			if rs.isReplayPaused {
+				isReplayPaused = 1.0
+			}
+			ch <- gauge(dWalReplayPaused, isReplayPaused)
+			host, port, err := rs.primaryHostPort()
+			if err != nil {
+				c.logger.Warning(err)
+			}
+			ch <- gauge(dWalReceiverStatus, float64(rs.walReceiverStatus), host, port)
+		} else {
+			ch <- counter(dWalCurrentLsn, float64(rs.currentLsn))
+		}
+	}
 }
 
 func (c *Collector) Describe(ch chan<- *prometheus.Desc) {
@@ -284,6 +317,11 @@ func (c *Collector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- dTopQueryTime
 	ch <- dTopQueryIOTime
 	ch <- dDbQueries
+	ch <- dWalReceiverStatus
+	ch <- dWalReplayPaused
+	ch <- dWalCurrentLsn
+	ch <- dWalReceiveLsn
+	ch <- dWalReplyLsn
 }
 
 func desc(name, help string, labels ...string) *prometheus.Desc {
@@ -292,4 +330,8 @@ func desc(name, help string, labels ...string) *prometheus.Desc {
 
 func gauge(desc *prometheus.Desc, value float64, labels ...string) prometheus.Metric {
 	return prometheus.MustNewConstMetric(desc, prometheus.GaugeValue, value, labels...)
+}
+
+func counter(desc *prometheus.Desc, value float64, labels ...string) prometheus.Metric {
+	return prometheus.MustNewConstMetric(desc, prometheus.CounterValue, value, labels...)
 }

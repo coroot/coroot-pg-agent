@@ -287,8 +287,12 @@ func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 	if c.replicationStatus != nil {
 		rs := c.replicationStatus
 		if rs.isInRecovery {
-			ch <- counter(dWalReceiveLsn, float64(rs.receiveLsn))
-			ch <- counter(dWalReplyLsn, float64(rs.replyLsn))
+			if rs.receiveLsn.Valid {
+				ch <- counter(dWalReceiveLsn, float64(rs.receiveLsn.Int64))
+			}
+			if rs.replyLsn.Valid {
+				ch <- counter(dWalReplyLsn, float64(rs.replyLsn.Int64))
+			}
 			isReplayPaused := 0.0
 			if rs.isReplayPaused {
 				isReplayPaused = 1.0
@@ -300,7 +304,9 @@ func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 			}
 			ch <- gauge(dWalReceiverStatus, float64(rs.walReceiverStatus), host, port)
 		} else {
-			ch <- counter(dWalCurrentLsn, float64(rs.currentLsn))
+			if rs.currentLsn.Valid {
+				ch <- counter(dWalCurrentLsn, float64(rs.currentLsn.Int64))
+			}
 		}
 	}
 }

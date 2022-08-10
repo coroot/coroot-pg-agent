@@ -28,9 +28,9 @@ func findValue(src string, re *regexp.Regexp) string {
 type replicationStatus struct {
 	isInRecovery bool
 
-	currentLsn int64
-	receiveLsn int64
-	replyLsn   int64
+	currentLsn sql.NullInt64
+	receiveLsn sql.NullInt64
+	replyLsn   sql.NullInt64
 
 	isReplayPaused bool
 

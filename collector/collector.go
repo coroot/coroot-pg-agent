@@ -12,7 +12,10 @@ import (
 	"time"
 )
 
-const topQueriesN = 20
+const (
+	topQueriesN        = 20
+	hardQuerySizeLimit = 4096
+)
 
 var (
 	dUp    = desc("pg_up", "Is the server reachable")
@@ -134,14 +137,30 @@ func (c *Collector) snapshot() {
 		c.logger.Warning(err)
 	}
 
+	querySizeLimit := 0
+	for _, s := range c.settings {
+		if s.Name == "track_activity_query_size" {
+			switch s.Unit {
+			case "B":
+				querySizeLimit = int(s.Value)
+			case "kB":
+				querySizeLimit = int(s.Value) * 1024
+			}
+			break
+		}
+	}
+	if querySizeLimit == 0 || querySizeLimit > hardQuerySizeLimit {
+		querySizeLimit = hardQuerySizeLimit
+	}
+
 	c.ssPrev = c.ssCurr
 	c.saPrev = c.saCurr
-	c.ssCurr, err = c.getStatStatements(version)
+	c.ssCurr, err = c.getStatStatements(version, querySizeLimit)
 	if err != nil {
 		c.logger.Warning(err)
 		return
 	}
-	c.saCurr, err = c.getPgStatActivity(version)
+	c.saCurr, err = c.getPgStatActivity(version, querySizeLimit)
 	if err != nil {
 		c.logger.Warning(err)
 		return

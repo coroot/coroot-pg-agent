@@ -155,7 +155,11 @@ func (c *Collector) snapshot() {
 
 	c.ssPrev = c.ssCurr
 	c.saPrev = c.saCurr
-	c.ssCurr, err = c.getStatStatements(version, querySizeLimit)
+	prevStatements := map[statementId]ssRow{}
+	if c.ssPrev != nil {
+		prevStatements = c.ssPrev.rows
+	}
+	c.ssCurr, err = c.getStatStatements(version, querySizeLimit, prevStatements)
 	if err != nil {
 		c.logger.Warning(err)
 		return

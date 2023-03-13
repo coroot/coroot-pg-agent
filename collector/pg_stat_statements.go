@@ -9,15 +9,15 @@ import (
 )
 
 type ssRow struct {
-	queryText sql.NullString
-	calls     sql.NullInt64
-	rows      sql.NullInt64
-	totalTime sql.NullFloat64
-	ioTime    sql.NullFloat64
+	obfuscatedQueryText string
+	calls               sql.NullInt64
+	rows                sql.NullInt64
+	totalTime           sql.NullFloat64
+	ioTime              sql.NullFloat64
 }
 
 func (r ssRow) QueryKey(id statementId) QueryKey {
-	return QueryKey{Query: obfuscate.Sql(r.queryText.String), User: id.user.String, DB: id.db.String}
+	return QueryKey{Query: r.obfuscatedQueryText, User: id.user.String, DB: id.db.String}
 }
 
 type statementId struct {
@@ -31,7 +31,7 @@ type ssSnapshot struct {
 	rows map[statementId]ssRow
 }
 
-func (c *Collector) getStatStatements(version semver.Version, querySizeLimit int) (*ssSnapshot, error) {
+func (c *Collector) getStatStatements(version semver.Version, querySizeLimit int, prev map[statementId]ssRow) (*ssSnapshot, error) {
 	snapshot := &ssSnapshot{ts: time.Now(), rows: map[statementId]ssRow{}}
 	var query string
 	switch {
@@ -48,16 +48,22 @@ func (c *Collector) getStatStatements(version semver.Version, querySizeLimit int
 		return nil, err
 	}
 	defer rows.Close()
+	var queryText sql.NullString
 	for rows.Next() {
 		var id statementId
 		r := ssRow{}
-		err := rows.Scan(&id.db, &id.user, &r.queryText, &id.id, &r.calls, &r.totalTime, &r.ioTime)
+		err := rows.Scan(&id.db, &id.user, &queryText, &id.id, &r.calls, &r.totalTime, &r.ioTime)
 		if err != nil {
 			c.logger.Warning("failed to scan pg_stat_statements row:", err)
 			continue
 		}
 		if id.user.String == "" || id.db.String == "" || !id.id.Valid {
 			continue
+		}
+		if p, ok := prev[id]; ok {
+			r.obfuscatedQueryText = p.obfuscatedQueryText
+		} else {
+			r.obfuscatedQueryText = obfuscate.Sql(queryText.String)
 		}
 		snapshot.rows[id] = r
 	}

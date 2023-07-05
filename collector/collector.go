@@ -145,6 +145,8 @@ func (c *Collector) snapshot() {
 				querySizeLimit = int(s.Value)
 			case "kB":
 				querySizeLimit = int(s.Value) * 1024
+			default:
+				querySizeLimit = int(s.Value)
 			}
 			break
 		}

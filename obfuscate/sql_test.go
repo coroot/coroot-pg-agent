@@ -242,6 +242,10 @@ func TestSql(t *testing.T) {
 			in:  "select lower('DdD'), cast(f as text)",
 			out: "select lower ( ? ), cast ( f as text )",
 		},
+		{
+			in:  "  select 1 ; ",
+			out: "select ?",
+		},
 	} {
 		assert.Equal(t, c.out, Sql(c.in), c.in)
 	}

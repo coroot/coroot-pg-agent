@@ -33,7 +33,8 @@ func Sql(query string) string {
 	query = rePunctuation.ReplaceAllString(query, " $1 ")
 	query = reWhitespace.ReplaceAllString(query, " ")
 	query = strings.ReplaceAll(query, " ,", ",")
-	query = strings.Trim(query, " ")
+	query = strings.TrimLeft(query, " ")
+	query = strings.TrimRight(query, "; ")
 	return query
 }
 

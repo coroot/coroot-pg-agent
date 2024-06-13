@@ -18,8 +18,9 @@ const (
 )
 
 var (
-	dUp    = desc("pg_up", "Is the server reachable")
-	dProbe = desc("pg_probe_seconds", "Empty query execution time")
+	dUp          = desc("pg_up", "Is the server reachable")
+	dProbe       = desc("pg_probe_seconds", "Empty query execution time")
+	dScrapeError = desc("pg_scrape_error", "Scrape error", "error", "warning")
 
 	dInfo     = desc("pg_info", "Server info", "server_version")
 	dSettings = desc("pg_setting", "Value of the pg_setting variable", "name", "unit")
@@ -78,6 +79,7 @@ type Collector struct {
 	saPrev            *saSnapshot
 	settings          []Setting
 	replicationStatus *replicationStatus
+	scrapeErrors      map[string]bool
 
 	lock   sync.RWMutex
 	logger logger.Logger
@@ -85,7 +87,7 @@ type Collector struct {
 
 func New(dsn string, scrapeInterval time.Duration, logger logger.Logger) (*Collector, error) {
 	ctx, cancelFunc := context.WithCancel(context.Background())
-	c := &Collector{logger: logger, ctxCancelFunc: cancelFunc}
+	c := &Collector{logger: logger, ctxCancelFunc: cancelFunc, scrapeErrors: map[string]bool{}}
 	var err error
 	c.db, err = sql.Open("postgres", dsn)
 	if err != nil {
@@ -115,25 +117,31 @@ func (c *Collector) snapshot() {
 	c.lock.Lock()
 	defer c.lock.Unlock()
 
+	c.scrapeErrors = map[string]bool{}
+
 	c.origVersion = ""
 	var version semver.Version
 	var rawVersion string
 	err := c.db.QueryRow(`SELECT setting FROM pg_settings WHERE name='server_version'`).Scan(&rawVersion)
 	if err != nil {
 		c.logger.Warning(err)
+		c.scrapeErrors[err.Error()] = true
 		return
 	}
 	c.origVersion, version, err = parsePgVersion(rawVersion)
 	if err != nil {
 		c.logger.Warning(err)
+		c.scrapeErrors[err.Error()] = true
 		return
 	}
 
 	if c.settings, err = c.getSettings(); err != nil {
+		c.scrapeErrors[err.Error()] = true
 		c.logger.Warning(err)
 	}
 
 	if c.replicationStatus, err = c.getReplicationStatus(version); err != nil {
+		c.scrapeErrors[err.Error()] = true
 		c.logger.Warning(err)
 	}
 
@@ -164,11 +172,13 @@ func (c *Collector) snapshot() {
 	c.ssCurr, err = c.getStatStatements(version, querySizeLimit, prevStatements)
 	if err != nil {
 		c.logger.Warning(err)
+		c.scrapeErrors[err.Error()] = true
 		return
 	}
 	c.saCurr, err = c.getPgStatActivity(version, querySizeLimit)
 	if err != nil {
 		c.logger.Warning(err)
+		c.scrapeErrors[err.Error()] = true
 		return
 	}
 }
@@ -292,6 +302,7 @@ func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 	if err := c.db.Ping(); err != nil {
 		c.logger.Warning("probe failed:", err)
 		ch <- gauge(dUp, 0)
+		ch <- gauge(dScrapeError, 1, err.Error(), "")
 		return
 	}
 	ch <- gauge(dUp, 1)
@@ -302,6 +313,10 @@ func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 
 	c.lock.RLock()
 	defer c.lock.RUnlock()
+
+	for e := range c.scrapeErrors {
+		ch <- gauge(dScrapeError, 1, "", e)
+	}
 
 	c.connectionMetrics(ch)
 	c.queryMetrics(ch)
@@ -339,6 +354,7 @@ func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 func (c *Collector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- dUp
 	ch <- dProbe
+	ch <- dScrapeError
 	ch <- dInfo
 	ch <- dConnections
 	ch <- dLatency

@@ -314,8 +314,12 @@ func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 	c.lock.RLock()
 	defer c.lock.RUnlock()
 
-	for e := range c.scrapeErrors {
-		ch <- gauge(dScrapeError, 1, "", e)
+	if len(c.scrapeErrors) > 0 {
+		for e := range c.scrapeErrors {
+			ch <- gauge(dScrapeError, 1, "", e)
+		}
+	} else {
+		ch <- gauge(dScrapeError, 0, "", "")
 	}
 
 	c.connectionMetrics(ch)

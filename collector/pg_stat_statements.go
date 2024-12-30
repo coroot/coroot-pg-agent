@@ -3,9 +3,10 @@ package collector
 import (
 	"database/sql"
 	"fmt"
+	"time"
+
 	"github.com/blang/semver"
 	"github.com/coroot/coroot-pg-agent/obfuscate"
-	"time"
 )
 
 type ssRow struct {
@@ -37,8 +38,10 @@ func (c *Collector) getStatStatements(version semver.Version, querySizeLimit int
 	switch {
 	case semver.MustParseRange(">=9.4.0 <13.0.0")(version):
 		query = `SELECT d.datname, r.rolname, LEFT(s.query, %d), s.queryid, s.calls, s.total_time, s.blk_read_time + s.blk_write_time`
-	case semver.MustParseRange(">=13.0.0")(version):
+	case semver.MustParseRange(">=13.0.0 <17.0.0")(version):
 		query = `SELECT d.datname, r.rolname, LEFT(s.query, %d), s.queryid, s.calls, s.total_plan_time + s.total_exec_time, s.blk_read_time + s.blk_write_time`
+	case semver.MustParseRange(">=17.0.0")(version):
+		query = `SELECT d.datname, r.rolname, LEFT(s.query, %d), s.queryid, s.calls, s.total_plan_time + s.total_exec_time, s.shared_blk_read_time + s.shared_blk_write_time + s.local_blk_read_time + s.local_blk_write_time + s.temp_blk_read_time + s.temp_blk_write_time`
 	default:
 		return nil, fmt.Errorf("postgres version %s is not supported", version)
 	}

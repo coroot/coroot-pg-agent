@@ -33,7 +33,7 @@ Learn more about query metrics in the blog post "[Missing metrics required to ga
 
 It is not enough to gather the number of active locks from *pg_locks*. 
 What engineers really want to know is which query is blocking other queries.
-The [pg_lock_awaiting_queries](https://coroot.com/docs/metrics/pg-agent#pg_lock_awaiting_queries) metric can provide the answer to that.
+The [pg_lock_awaiting_queries](https://docs.coroot.com/metrics/cluster-agent#pg_lock_awaiting_queries) metric can provide the answer to that.
 
 ### Query normalization and obfuscation
 
@@ -59,7 +59,7 @@ In addition to query normalization, which Postgres does, the agent obfuscates al
 
 ## Metrics
 
-The collected metrics are described [here](https://coroot.com/docs/metrics/pg-agent).
+The collected metrics are described [here](https://docs.coroot.com/metrics/cluster-agent#postgres).
 
 ## License
 

@@ -3,18 +3,20 @@ package collector
 import (
 	"context"
 	"database/sql"
+	"strings"
+	"sync"
+	"time"
+
 	"github.com/blang/semver"
 	"github.com/coroot/logger"
 	_ "github.com/lib/pq"
 	"github.com/prometheus/client_golang/prometheus"
-	"strings"
-	"sync"
-	"time"
 )
 
 const (
 	topQueriesN        = 20
 	hardQuerySizeLimit = 4096
+	pingTimeout        = 10 * time.Second
 )
 
 var (
@@ -94,7 +96,9 @@ func New(dsn string, scrapeInterval time.Duration, logger logger.Logger) (*Colle
 		return nil, err
 	}
 	c.db.SetMaxOpenConns(1)
-	if err := c.db.Ping(); err != nil {
+	pingCtx, pingCancelFunc := context.WithTimeout(ctx, pingTimeout)
+	defer pingCancelFunc()
+	if err := c.db.PingContext(pingCtx); err != nil {
 		c.logger.Warning("probe failed:", err)
 	}
 	go func() {
@@ -299,7 +303,9 @@ func (c *Collector) Close() error {
 
 func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 	now := time.Now()
-	if err := c.db.Ping(); err != nil {
+	ctx, cancelFunc := context.WithTimeout(context.Background(), pingTimeout)
+	defer cancelFunc()
+	if err := c.db.PingContext(ctx); err != nil {
 		c.logger.Warning("probe failed:", err)
 		ch <- gauge(dUp, 0)
 		ch <- gauge(dScrapeError, 1, err.Error(), "")

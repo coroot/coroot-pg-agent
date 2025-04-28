@@ -1,13 +1,15 @@
 package collector
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"fmt"
-	"github.com/blang/semver"
 	"net/url"
 	"regexp"
 	"strings"
+
+	"github.com/blang/semver"
 )
 
 var (
@@ -56,9 +58,9 @@ func (rs *replicationStatus) primaryHostPort() (string, string, error) {
 	return host, port, nil
 }
 
-func (c *Collector) getReplicationStatus(version semver.Version) (*replicationStatus, error) {
+func (c *Collector) getReplicationStatus(ctx context.Context, version semver.Version) (*replicationStatus, error) {
 	var isInRecovery sql.NullBool
-	if err := c.db.QueryRow(`SELECT pg_is_in_recovery()`).Scan(&isInRecovery); err != nil {
+	if err := c.db.QueryRowContext(ctx, `SELECT pg_is_in_recovery()`).Scan(&isInRecovery); err != nil {
 		return nil, err
 	}
 
@@ -85,21 +87,21 @@ func (c *Collector) getReplicationStatus(version semver.Version) (*replicationSt
 
 	rs := &replicationStatus{isInRecovery: isInRecovery.Bool}
 	if rs.isInRecovery {
-		if err := c.db.QueryRow(fmt.Sprintf(
+		if err := c.db.QueryRowContext(ctx, fmt.Sprintf(
 			`SELECT %s()-'0/0', %s()-'0/0', %s()`, fReceiveLsn, fReplyLsn, fIsReplayPaused)).Scan(
 			&rs.receiveLsn, &rs.replyLsn, &rs.isReplayPaused); err != nil {
 			return nil, err
 		}
-		if err := c.db.QueryRow(`SELECT count(1) FROM pg_stat_wal_receiver`).Scan(&rs.walReceiverStatus); err != nil {
+		if err := c.db.QueryRowContext(ctx, `SELECT count(1) FROM pg_stat_wal_receiver`).Scan(&rs.walReceiverStatus); err != nil {
 			return nil, err
 		}
-		if err := c.db.QueryRow(`SELECT setting FROM pg_settings WHERE name='primary_conninfo'`).Scan(&rs.primaryConnectionInfo); err != nil {
+		if err := c.db.QueryRowContext(ctx, `SELECT setting FROM pg_settings WHERE name='primary_conninfo'`).Scan(&rs.primaryConnectionInfo); err != nil {
 			if !errors.Is(err, sql.ErrNoRows) {
 				return nil, err
 			}
 		}
 	} else {
-		if err := c.db.QueryRow(fmt.Sprintf(`SELECT %s()-'0/0'`, fCurrentLsn)).Scan(&rs.currentLsn); err != nil {
+		if err := c.db.QueryRowContext(ctx, fmt.Sprintf(`SELECT %s()-'0/0'`, fCurrentLsn)).Scan(&rs.currentLsn); err != nil {
 			return nil, err
 		}
 	}

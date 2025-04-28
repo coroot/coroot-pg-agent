@@ -16,7 +16,6 @@ import (
 const (
 	topQueriesN        = 20
 	hardQuerySizeLimit = 4096
-	pingTimeout        = 10 * time.Second
 )
 
 var (
@@ -69,7 +68,11 @@ type ConnectionKey struct {
 }
 
 type Collector struct {
+	ctx           context.Context
 	ctxCancelFunc context.CancelFunc
+
+	scrapeInterval time.Duration
+	collectTimeout time.Duration
 
 	db          *sql.DB
 	origVersion string
@@ -87,16 +90,23 @@ type Collector struct {
 	logger logger.Logger
 }
 
-func New(dsn string, scrapeInterval time.Duration, logger logger.Logger) (*Collector, error) {
+func New(dsn string, scrapeInterval, collectTimeout time.Duration, logger logger.Logger) (*Collector, error) {
 	ctx, cancelFunc := context.WithCancel(context.Background())
-	c := &Collector{logger: logger, ctxCancelFunc: cancelFunc, scrapeErrors: map[string]bool{}}
+	c := &Collector{
+		ctx:            ctx,
+		logger:         logger,
+		ctxCancelFunc:  cancelFunc,
+		scrapeErrors:   map[string]bool{},
+		scrapeInterval: scrapeInterval,
+		collectTimeout: collectTimeout,
+	}
 	var err error
 	c.db, err = sql.Open("postgres", dsn)
 	if err != nil {
 		return nil, err
 	}
 	c.db.SetMaxOpenConns(1)
-	pingCtx, pingCancelFunc := context.WithTimeout(ctx, pingTimeout)
+	pingCtx, pingCancelFunc := context.WithTimeout(ctx, collectTimeout)
 	defer pingCancelFunc()
 	if err := c.db.PingContext(pingCtx); err != nil {
 		c.logger.Warning("probe failed:", err)
@@ -118,6 +128,13 @@ func New(dsn string, scrapeInterval time.Duration, logger logger.Logger) (*Colle
 }
 
 func (c *Collector) snapshot() {
+	timeout := c.scrapeInterval - time.Second
+	if timeout <= 0 {
+		timeout = time.Second
+	}
+
+	ctx, cancelFunc := context.WithTimeout(c.ctx, timeout)
+	defer cancelFunc()
 	c.lock.Lock()
 	defer c.lock.Unlock()
 
@@ -126,7 +143,7 @@ func (c *Collector) snapshot() {
 	c.origVersion = ""
 	var version semver.Version
 	var rawVersion string
-	err := c.db.QueryRow(`SELECT setting FROM pg_settings WHERE name='server_version'`).Scan(&rawVersion)
+	err := c.db.QueryRowContext(ctx, `SELECT setting FROM pg_settings WHERE name='server_version'`).Scan(&rawVersion)
 	if err != nil {
 		c.logger.Warning(err)
 		c.scrapeErrors[err.Error()] = true
@@ -139,12 +156,12 @@ func (c *Collector) snapshot() {
 		return
 	}
 
-	if c.settings, err = c.getSettings(); err != nil {
+	if c.settings, err = c.getSettings(ctx); err != nil {
 		c.scrapeErrors[err.Error()] = true
 		c.logger.Warning(err)
 	}
 
-	if c.replicationStatus, err = c.getReplicationStatus(version); err != nil {
+	if c.replicationStatus, err = c.getReplicationStatus(ctx, version); err != nil {
 		c.scrapeErrors[err.Error()] = true
 		c.logger.Warning(err)
 	}
@@ -173,13 +190,13 @@ func (c *Collector) snapshot() {
 	if c.ssPrev != nil {
 		prevStatements = c.ssPrev.rows
 	}
-	c.ssCurr, err = c.getStatStatements(version, querySizeLimit, prevStatements)
+	c.ssCurr, err = c.getStatStatements(ctx, version, querySizeLimit, prevStatements)
 	if err != nil {
 		c.logger.Warning(err)
 		c.scrapeErrors[err.Error()] = true
 		return
 	}
-	c.saCurr, err = c.getPgStatActivity(version, querySizeLimit)
+	c.saCurr, err = c.getPgStatActivity(ctx, version, querySizeLimit)
 	if err != nil {
 		c.logger.Warning(err)
 		c.scrapeErrors[err.Error()] = true
@@ -302,9 +319,9 @@ func (c *Collector) Close() error {
 }
 
 func (c *Collector) Collect(ch chan<- prometheus.Metric) {
-	now := time.Now()
-	ctx, cancelFunc := context.WithTimeout(context.Background(), pingTimeout)
+	ctx, cancelFunc := context.WithTimeout(c.ctx, c.collectTimeout)
 	defer cancelFunc()
+	now := time.Now()
 	if err := c.db.PingContext(ctx); err != nil {
 		c.logger.Warning("probe failed:", err)
 		ch <- gauge(dUp, 0)

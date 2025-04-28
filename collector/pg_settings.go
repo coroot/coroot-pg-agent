@@ -1,6 +1,7 @@
 package collector
 
 import (
+	"context"
 	"database/sql"
 	"strconv"
 )
@@ -11,8 +12,8 @@ type Setting struct {
 	Value float64
 }
 
-func (c *Collector) getSettings() ([]Setting, error) {
-	rows, err := c.db.Query(`SELECT name, setting, unit, vartype FROM pg_settings WHERE vartype in ('integer','real', 'bool')`)
+func (c *Collector) getSettings(ctx context.Context) ([]Setting, error) {
+	rows, err := c.db.QueryContext(ctx, `SELECT name, setting, unit, vartype FROM pg_settings WHERE vartype in ('integer','real', 'bool')`)
 	if err != nil {
 		return nil, err
 	}

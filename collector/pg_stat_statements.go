@@ -1,6 +1,7 @@
 package collector
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"time"
@@ -32,7 +33,7 @@ type ssSnapshot struct {
 	rows map[statementId]ssRow
 }
 
-func (c *Collector) getStatStatements(version semver.Version, querySizeLimit int, prev map[statementId]ssRow) (*ssSnapshot, error) {
+func (c *Collector) getStatStatements(ctx context.Context, version semver.Version, querySizeLimit int, prev map[statementId]ssRow) (*ssSnapshot, error) {
 	snapshot := &ssSnapshot{ts: time.Now(), rows: map[statementId]ssRow{}}
 	var query string
 	switch {
@@ -46,7 +47,7 @@ func (c *Collector) getStatStatements(version semver.Version, querySizeLimit int
 		return nil, fmt.Errorf("postgres version %s is not supported", version)
 	}
 	query += ` FROM pg_stat_statements s JOIN pg_roles r ON r.oid=s.userid JOIN pg_database d ON d.oid=s.dbid AND NOT d.datistemplate`
-	rows, err := c.db.Query(fmt.Sprintf(query, querySizeLimit))
+	rows, err := c.db.QueryContext(ctx, fmt.Sprintf(query, querySizeLimit))
 	if err != nil {
 		return nil, err
 	}

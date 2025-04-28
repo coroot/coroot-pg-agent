@@ -1,12 +1,14 @@
 package collector
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
-	"github.com/blang/semver"
-	"github.com/coroot/coroot-pg-agent/obfuscate"
 	"strings"
 	"time"
+
+	"github.com/blang/semver"
+	"github.com/coroot/coroot-pg-agent/obfuscate"
 )
 
 type Connection struct {
@@ -33,7 +35,7 @@ type saSnapshot struct {
 	connections map[int]Connection
 }
 
-func (c *Collector) getPgStatActivity(version semver.Version, querySizeLimit int) (*saSnapshot, error) {
+func (c *Collector) getPgStatActivity(ctx context.Context, version semver.Version, querySizeLimit int) (*saSnapshot, error) {
 	snapshot := &saSnapshot{connections: map[int]Connection{}}
 	var query string
 	switch {
@@ -47,7 +49,7 @@ func (c *Collector) getPgStatActivity(version semver.Version, querySizeLimit int
 		return nil, fmt.Errorf("postgres version %s is not supported", version)
 	}
 	query += " FROM pg_stat_activity s JOIN pg_database d ON s.datid = d.oid AND NOT d.datistemplate"
-	rows, err := c.db.Query(fmt.Sprintf(query, querySizeLimit))
+	rows, err := c.db.QueryContext(ctx, fmt.Sprintf(query, querySizeLimit))
 	if err != nil {
 		return nil, err
 	}

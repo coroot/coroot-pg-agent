@@ -1,3 +1,8 @@
+> [!IMPORTANT]
+> This repository is no longer maintained.
+> PostgreSQL-related functionality has moved to [coroot-cluster-agent](https://github.com/coroot/coroot-cluster-agent).
+> If you'd like to continue using this exporter, feel free to fork the repository.
+
 # Coroot-pg-agent
 
 [![Go Report Card](https://goreportcard.com/badge/github.com/coroot/coroot-pg-agent)](https://goreportcard.com/report/github.com/coroot/coroot-pg-agent)

@@ -4,11 +4,11 @@ import (
 	"net/http"
 	_ "net/http/pprof"
 
+	"github.com/alecthomas/kingpin/v2"
 	"github.com/coroot/coroot-pg-agent/collector"
 	"github.com/coroot/logger"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
-	"gopkg.in/alecthomas/kingpin.v2"
 )
 
 var version = "unknown"
